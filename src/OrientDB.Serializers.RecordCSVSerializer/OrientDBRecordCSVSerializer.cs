@@ -28,6 +28,150 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
         public IEnumerable<TResultType> Deserialize<TResultType>(byte[] data) where TResultType : IOrientDBEntity
         {
+            var recordString = BinarySerializer.ToString(data).Trim();
+
+            return Deserialize<TResultType>(recordString);
+        }
+
+        internal IEnumerable<TResultType> Deserialize<TResultType>(string recordString) where TResultType : IOrientDBEntity
+        {
+            TResultType entity = Activator.CreateInstance<TResultType>();
+
+            int atIndex = recordString.IndexOf('@');
+            int colonIndex = recordString.IndexOf(':');
+            int index = 0;
+
+            // parse class name
+            if ((atIndex != -1) && (atIndex < colonIndex))
+            {
+                entity.OClassName = recordString.Substring(0, atIndex);
+                index = atIndex + 1;
+            }
+
+            // start document parsing with first field name
+            IDictionary<string, object> waterBucket = new Dictionary<string, object>();
+
+            do
+            {               
+                index = ParseFieldName<TResultType>(index, recordString, waterBucket);
+            } while (index < recordString.Length);
+
+            // Will probably need a check here to determine how many actual distinct documents we
+            // have as this could very well be a collection. Will need a way to determine this here
+            // (Normally done while requesting data with PayloadStatus.
+
+            entity.Hydrate(waterBucket);
+
+            return new List<TResultType>() { entity }; // Just for now.
+        }
+
+        private int ParseFieldName<TResultType>(int index, string recordString, IDictionary<string, object> waterBucket)
+        {
+            int startIndex = index;
+
+            int iColonPos = recordString.IndexOf(':', index);
+            if (iColonPos == -1)
+                return recordString.Length;
+
+            index = iColonPos;
+
+            // parse field name string from raw document string
+            string fieldName = recordString.Substring(startIndex, index - startIndex);
+            int pos = fieldName.IndexOf('@');
+            if (pos > 0)
+            {
+                fieldName = fieldName.Substring(pos + 1, fieldName.Length - pos - 1);
+            }
+
+            fieldName = fieldName.Replace("\"", "");
+
+            waterBucket.Add(fieldName, null);
+
+            // move to position after colon (:)
+            index++;
+
+            // check if it's not the end of document which means that current field has null value
+            if (index == recordString.Length)
+            {
+                return index;
+            }
+
+            // check what follows after parsed field name and start parsing underlying type
+            switch (recordString[index])
+            {
+                case '"':
+                    index = ParseString(index, recordString, waterBucket, fieldName);
+                    break;
+                case '#':
+                    index = ParseRecordID(index, recordString, waterBucket, fieldName);
+                    break;
+                case '(':
+                    index = ParseEmbeddedDocument(index, recordString, waterBucket, fieldName);
+                    break;
+                case '[':
+                    index = ParseList(index, recordString, waterBucket, fieldName);
+                    break;
+                case '<':
+                    index = ParseSet(index, recordString, waterBucket, fieldName);
+                    break;
+                case '{':
+                    index = ParseEmbeddedDocument(index, recordString, waterBucket, fieldName);
+                    break;
+                case '%':
+                    index = ParseRidBags(index, recordString, waterBucket, fieldName);
+                    break;
+                default:
+                    index = ParseValue(index, recordString, waterBucket, fieldName);
+                    break;
+            }
+
+            // check if it's not the end of document which means that current field has null value
+            if (index == recordString.Length)
+            {
+                return index;
+            }
+
+            // single string value was parsed and we need to push the index if next character is comma
+            if (recordString[index] == ',')
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        private int ParseValue(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseRidBags(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseSet(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseList(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseEmbeddedDocument(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseRecordID(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            throw new NotImplementedException();
+        }
+
+        private int ParseString(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
             throw new NotImplementedException();
         }
 
