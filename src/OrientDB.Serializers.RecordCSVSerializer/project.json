@@ -1,8 +1,8 @@
 ﻿{
-  "version": "1.0.0-*",
+  "version": "0.0.5-prerelease",
 
   "dependencies": {
-    "OrientDB.Core": "0.0.8-prerelease"
+    "OrientDB.Core": "0.0.10-prerelease"
   },
 
   "frameworks": {

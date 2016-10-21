@@ -8,6 +8,7 @@ using System.Reflection;
 using OrientDB.Serializers.RecordCSVSerializer.Extensions;
 using System.Collections;
 using System.Globalization;
+using OrientDB.Core.Models;
 
 namespace OrientDB.Serializers.RecordCSVSerializer
 {
@@ -26,14 +27,14 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
         }
 
-        public IEnumerable<TResultType> Deserialize<TResultType>(byte[] data) where TResultType : IOrientDBEntity
+        public TResultType Deserialize<TResultType>(byte[] data) where TResultType : OrientDBEntity
         {
             var recordString = BinarySerializer.ToString(data).Trim();
 
             return Deserialize<TResultType>(recordString);
         }
 
-        internal IEnumerable<TResultType> Deserialize<TResultType>(string recordString) where TResultType : IOrientDBEntity
+        internal TResultType Deserialize<TResultType>(string recordString) where TResultType : OrientDBEntity
         {
             TResultType entity = Activator.CreateInstance<TResultType>();
 
@@ -62,7 +63,7 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
             entity.Hydrate(waterBucket);
 
-            return new List<TResultType>() { entity }; // Just for now.
+            return entity;
         }
 
         private int ParseFieldName<TResultType>(int index, string recordString, IDictionary<string, object> waterBucket)
@@ -142,7 +143,115 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
         private int ParseValue(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            int startIndex = index;
+
+            // search for end of parsed field value
+            while (
+                (index < recordString.Length) &&
+                (recordString[index] != ',') &&
+                (recordString[index] != ')') &&
+                (recordString[index] != ']') &&
+                (recordString[index] != '}') &&
+                (recordString[index] != '>'))
+            {
+                index++;
+            }
+
+            // determine the type of field value
+
+            string stringValue = recordString.Substring(startIndex, index - startIndex);
+            object value = new object();
+
+            if (stringValue.Length > 0)
+            {
+                // binary content
+                if ((stringValue.Length > 2) && (stringValue[0] == '_') && (stringValue[stringValue.Length - 1] == '_'))
+                {
+                    stringValue = stringValue.Substring(1, stringValue.Length - 2);
+
+                    // need to be able for base64 encoding which requires content to be devidable by 4
+                    int mod4 = stringValue.Length % 4;
+
+                    if (mod4 > 0)
+                    {
+                        stringValue += new string('=', 4 - mod4);
+                    }
+
+                    value = Convert.FromBase64String(stringValue);
+                }
+                // datetime or date
+                else if ((stringValue.Length > 2) && (stringValue[stringValue.Length - 1] == 't') || (stringValue[stringValue.Length - 1] == 'a'))
+                {
+                    // Unix timestamp is miliseconds past epoch
+                    // FIXME: this assumes the server JVM timezone is UTC when it might not be
+                    // instead the timezone should be read from the server
+                    DateTime epoch = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
+                    string foo = stringValue.Substring(0, stringValue.Length - 1);
+                    double d = double.Parse(foo);
+                    value = epoch.AddMilliseconds(d).ToUniversalTime();
+                }
+                // boolean
+                else if ((stringValue.Length > 2) && (stringValue == "true") || (stringValue == "false"))
+                {
+                    value = (stringValue == "true") ? true : false;
+                }
+                // null
+                else if ((stringValue.Length > 2) && (stringValue == "null"))
+                {
+                    value = null;
+                }
+                // numbers
+                else
+                {
+                    char lastCharacter = stringValue[stringValue.Length - 1];
+
+                    switch (lastCharacter)
+                    {
+                        case 'b':
+                            value = byte.Parse(stringValue.Substring(0, stringValue.Length - 1));
+                            break;
+                        case 's':
+                            value = short.Parse(stringValue.Substring(0, stringValue.Length - 1));
+                            break;
+                        case 'l':
+                            value = long.Parse(stringValue.Substring(0, stringValue.Length - 1));
+                            break;
+                        case 'f':
+                            value = float.Parse(stringValue.Substring(0, stringValue.Length - 1), CultureInfo.InvariantCulture);
+                            break;
+                        case 'd':
+                            value = double.Parse(stringValue.Substring(0, stringValue.Length - 1), CultureInfo.InvariantCulture);
+                            break;
+                        case 'c':
+                            value = decimal.Parse(stringValue.Substring(0, stringValue.Length - 1), CultureInfo.InvariantCulture);
+                            break;
+                        default:
+                            value = int.Parse(stringValue);
+                            break;
+                    }
+                }
+            }
+            // null
+            else if (stringValue.Length == 0)
+            {
+                value = null;
+            }
+
+            //assign field value
+            if (waterBucket[fieldName] == null)
+            {
+                waterBucket[fieldName] = value;
+            }
+            else if (waterBucket[fieldName] is HashSet<object>)
+            {
+                ((HashSet<object>)waterBucket[fieldName]).Add(value);
+            }
+            else
+            {
+                ((List<object>)waterBucket[fieldName]).Add(value);
+            }
+
+            return index;
         }
 
         private int ParseRidBags(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
@@ -172,15 +281,61 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
         private int ParseString(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            // move to the inside of string
+            index++;
+
+            int startIndex = index;
+
+            // search for end of the parsed string value
+            while (recordString[index] != '"')
+            {
+                // strings must escape these characters:
+                // " -> \"
+                // \ -> \\
+                // therefore there needs to be a check for valid end of the string which
+                // is quote character that is not preceeded by backslash character \
+                if ((recordString[index] == '\\') && (recordString[index + 1] == '\\' || recordString[index + 1] == '"'))
+                {
+                    index = index + 2;
+                }
+                else
+                {
+                    index++;
+                }
+            }
+
+            string value = recordString.Substring(startIndex, index - startIndex);
+            // escape quotes
+            value = value.Replace("\\" + "\"", "\"");
+            // escape backslashes
+            value = value.Replace("\\\\", "\\");
+
+            // assign field value
+            if (waterBucket[fieldName] == null)
+            {
+                waterBucket[fieldName] = value;
+            }
+            else if (waterBucket[fieldName] is HashSet<object>)
+            {
+                ((HashSet<object>)waterBucket[fieldName]).Add(value);
+            }
+            else
+            {
+                ((List<object>)waterBucket[fieldName]).Add(value);
+            }
+
+            // move past the closing quote character
+            index++;
+
+            return index;
         }
 
-        public byte[] Serialize<T>(T input) where T : IOrientDBEntity
+        public byte[] Serialize<T>(T input) where T : OrientDBEntity
         {
             return Encoding.UTF8.GetBytes($"{input.OClassName}@{SerializeEntity(input)}");
         }
 
-        private object SerializeEntity(IOrientDBEntity input)
+        private object SerializeEntity(OrientDBEntity input)
         {
             StringBuilder stringBuilder = new StringBuilder();
 
