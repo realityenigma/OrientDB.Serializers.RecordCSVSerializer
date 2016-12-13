@@ -9,6 +9,8 @@ using OrientDB.Serializers.RecordCSVSerializer.Extensions;
 using System.Collections;
 using System.Globalization;
 using OrientDB.Core.Models;
+using OrientDB.Serializers.RecordCSVSerializer.Models;
+using System.IO;
 
 namespace OrientDB.Serializers.RecordCSVSerializer
 {
@@ -54,7 +56,7 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
             do
             {               
-                index = ParseFieldName<TResultType>(index, recordString, waterBucket);
+                index = ParseFieldName(index, recordString, waterBucket);
             } while (index < recordString.Length);
 
             // Will probably need a check here to determine how many actual distinct documents we
@@ -66,7 +68,7 @@ namespace OrientDB.Serializers.RecordCSVSerializer
             return entity;
         }
 
-        private int ParseFieldName<TResultType>(int index, string recordString, IDictionary<string, object> waterBucket)
+        private int ParseFieldName(int index, string recordString, IDictionary<string, object> waterBucket)
         {
             int startIndex = index;
 
@@ -85,7 +87,7 @@ namespace OrientDB.Serializers.RecordCSVSerializer
             }
 
             fieldName = fieldName.Replace("\"", "");
-
+           
             waterBucket.Add(fieldName, null);
 
             // move to position after colon (:)
@@ -256,27 +258,290 @@ namespace OrientDB.Serializers.RecordCSVSerializer
 
         private int ParseRidBags(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            //move to first base64 char
+            index++;
+
+            StringBuilder builder = new StringBuilder();
+
+            while (recordString[index] != ';')
+            {
+                builder.Append(recordString[index]);
+                index++;
+            }
+
+            // use a list as it preserves order at this stage which may be important when using ordered edges
+            var rids = new List<ORID>();
+
+            var value = Convert.FromBase64String(builder.ToString());
+            using (var stream = new MemoryStream(value))
+            using (var reader = new BinaryReader(stream))
+            {
+                var first = reader.ReadByte();
+                int offset = 1;
+                if ((first & 2) == 2)
+                {
+                    // uuid parsing is not implemented
+                    offset += 16;
+                }
+
+                if ((first & 1) == 1) // 1 - embedded,0 - tree-based 
+                {
+                    var entriesSize = reader.ReadInt32EndianAware();
+                    for (int j = 0; j < entriesSize; j++)
+                    {
+                        var clusterid = reader.ReadInt16EndianAware();
+                        var clusterposition = reader.ReadInt64EndianAware();
+                        rids.Add(new ORID(clusterid, clusterposition));
+                    }
+                }
+
+                // else => There is some lazy loading logic in original implementation here. Not sure how to integrate this into new architecture yet.
+            }
+
+            waterBucket[fieldName] = rids;
+            //move past ';'
+            index++;
+
+            return index;
         }
 
         private int ParseSet(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            // move to the first element of this set
+            index++;
+
+            if (waterBucket[fieldName] == null)
+            {
+                waterBucket[fieldName] = new HashSet<object>();
+            }
+
+            while (recordString[index] != '>')
+            {
+                // check what follows after parsed field name and start parsing underlying type
+                switch (recordString[index])
+                {
+                    case '"':
+                        index = ParseString(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '#':
+                        index = ParseRecordID(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '(':
+                        index = ParseEmbeddedDocument(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '{':
+                        index = ParseMap(index, recordString, waterBucket, fieldName);
+                        break;
+                    case ',':
+                        index++;
+                        break;
+                    default:
+                        index = ParseValue(index, recordString, waterBucket, fieldName);
+                        break;
+                }
+            }
+
+            // move past closing bracket of this set
+            index++;
+
+            return index;
+        }
+
+        private int ParseMap(int i, string recordString, IDictionary<string, object> waterBucket, string fieldName)
+        {
+            int startIndex = i;
+            int nestingLevel = 1;
+
+            // search for end of parsed map
+            while ((i < recordString.Length) && (nestingLevel != 0))
+            {
+                // check for beginning of the string to prevent finding an end of map within string value
+                if (recordString[i + 1] == '"')
+                {
+                    // move to the beginning of the string
+                    i++;
+
+                    // go to the end of string
+                    while ((i < recordString.Length) && (recordString[i + 1] != '"'))
+                    {
+                        i++;
+                    }
+
+                    // move to the end of string
+                    i++;
+                }
+                else if (recordString[i + 1] == '{')
+                {
+                    // move to the beginning of the string
+                    i++;
+
+                    nestingLevel++;
+                }
+                else if (recordString[i + 1] == '}')
+                {
+                    // move to the beginning of the string
+                    i++;
+
+                    nestingLevel--;
+                }
+                else
+                {
+                    i++;
+                }
+            }
+
+            // move past the closing bracket character
+            i++;
+
+            // do not include { and } in field value
+            startIndex++;
+
+            //assign field value
+            if (waterBucket[fieldName] == null)
+            {
+                waterBucket[fieldName] = recordString.Substring(startIndex, i - 1 - startIndex);
+            }
+            else if (waterBucket[fieldName] is HashSet<object>)
+            {
+                ((HashSet<object>)waterBucket[fieldName]).Add(recordString.Substring(startIndex, i - 1 - startIndex));
+            }
+            else
+            {
+                ((List<object>)waterBucket[fieldName]).Add(recordString.Substring(startIndex, i - 1 - startIndex));
+            }
+
+            return i;
         }
 
         private int ParseList(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            // move to the first element of this list
+            index++;
+
+            if (waterBucket[fieldName] == null)
+            {
+                waterBucket[fieldName] = new List<object>();
+            }
+
+            while (recordString[index] != ']')
+            {
+                // check what follows after parsed field name and start parsing underlying type
+                switch (recordString[index])
+                {
+                    case '"':
+                        index = ParseString(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '#':
+                        index = ParseRecordID(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '(':
+                        index = ParseEmbeddedDocument(index, recordString, waterBucket, fieldName);
+                        break;
+                    case '{':
+                        index = ParseEmbeddedDocument(index, recordString, waterBucket, fieldName);
+                        break;
+                    case ',':
+                        index++;
+                        break;
+                    default:
+                        index = ParseValue(index, recordString, waterBucket, fieldName);
+                        break;
+                }
+            }
+
+            // move past closing bracket of this list
+            index++;
+
+            return index;
         }
 
         private int ParseEmbeddedDocument(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            // move to the inside of embedded document (go past starting bracket character)
+            index++;
+
+
+            if ((index < 15) && (recordString.Length > 15) && (recordString.Substring(index, 15).Equals("ORIDs@pageSize:")))
+            {
+                OLinkCollection linkCollection = new OLinkCollection();
+                index = ParseLinkCollection(index, recordString, linkCollection);
+                waterBucket[fieldName] = linkCollection;
+            }
+            else
+            {
+                // create new dictionary which would hold K/V pairs of embedded document        
+                IDictionary<string, object> embeddedDocument = new Dictionary<string, object>();
+
+                // assign embedded object
+                if (!embeddedDocument.ContainsKey(fieldName))
+                {
+                    waterBucket[fieldName] = embeddedDocument;
+                }
+                else if (waterBucket[fieldName] is HashSet<object>)
+                {
+                    ((HashSet<object>)waterBucket[fieldName]).Add(embeddedDocument);
+                }
+                else
+                {
+                    ((List<object>)waterBucket[fieldName]).Add(embeddedDocument);
+                }
+
+                // start parsing field names until the closing bracket of embedded document is reached
+
+                while (recordString[index] != ')' && recordString[index] != '}')
+                {
+                    index = ParseFieldName(index, recordString, embeddedDocument);
+                }
+            }
+
+            // move past close bracket of embedded document
+            index++;
+
+            return index;
         }
 
         private int ParseRecordID(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
         {
-            throw new NotImplementedException();
+            int startIndex = index;
+
+            // search for end of parsed record ID value
+            while (
+                (index < recordString.Length) &&
+                (recordString[index] != ',') &&
+                (recordString[index] != ')') &&
+                (recordString[index] != ']') &&
+                (recordString[index] != '}') &&
+                (recordString[index] != '>'))
+            {
+                index++;
+            }
+
+
+            //assign field value
+            if (waterBucket[fieldName] == null)
+            {
+                // there is a special case when OEdge InV/OutV fields contains only single ORID instead of HashSet<ORID>
+                // therefore single ORID should be deserialized into HashSet<ORID> type
+                if (fieldName.Equals("in_") || fieldName.Equals("out_"))
+                {
+                    waterBucket[fieldName] = new HashSet<ORID>();
+                    ((HashSet<ORID>)waterBucket[fieldName]).Add(new ORID(recordString, startIndex));
+                }
+                else
+                {
+                    waterBucket[fieldName] = new ORID(recordString, startIndex);
+                }
+            }
+            else if (waterBucket[fieldName] is HashSet<object>)
+            {
+                ((HashSet<object>)waterBucket[fieldName]).Add(new ORID(recordString, startIndex));
+            }
+            else
+            {
+                ((List<object>)waterBucket[fieldName]).Add(new ORID(recordString, startIndex));
+            }
+
+            return index;
         }
 
         private int ParseString(int index, string recordString, IDictionary<string, object> waterBucket, string fieldName)
@@ -333,6 +598,33 @@ namespace OrientDB.Serializers.RecordCSVSerializer
         public byte[] Serialize<T>(T input) where T : OrientDBEntity
         {
             return Encoding.UTF8.GetBytes($"{input.OClassName}@{SerializeEntity(input)}");
+        }
+
+        private int ParseLinkCollection(int i, string recordString, OLinkCollection linkCollection)
+        {
+            // move to the start of pageSize value
+            i += 15;
+
+            int index = recordString.IndexOf(',', i);
+
+            linkCollection.PageSize = int.Parse(recordString.Substring(i, index - i));
+
+            // move to root value
+            i = index + 6;
+            index = recordString.IndexOf(',', i);
+
+            linkCollection.Root = new ORID(recordString.Substring(i, index - i));
+
+            // move to keySize value
+            i = index + 9;
+            index = recordString.IndexOf(')', i);
+
+            linkCollection.KeySize = int.Parse(recordString.Substring(i, index - i));
+
+            // move past close bracket of link collection
+            i++;
+
+            return i;
         }
 
         private object SerializeEntity(OrientDBEntity input)
