@@ -1,4 +1,5 @@
 ﻿using OrientDB.Core;
+using OrientDB.Core.Models;
 using OrientDB.Serializers.RecordCSVSerializer.Extensions;
 using System;
 using System.Collections.Generic;
